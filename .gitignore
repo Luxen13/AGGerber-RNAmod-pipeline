@@ -1,0 +1,47 @@
+# --- SECURITY  ---
+# Environment variables
+.env
+.env.local
+.env.*
+env/
+
+# Keys and Certificates
+*.pem
+*.key
+*.pub
+*.crt
+id_rsa
+id_rsa.pub
+*_rsa
+*_dsa
+
+
+# --- PIPELINE SPECIFIC ---
+nf/.nextflow/
+/nf/work/
+.nextflow.*
+nf/dist_modkit_v0.5.0_5120ef7/
+nf/test_pod5_Data.transcriptome.bed
+nf/results/*
+/prese/
+temporary_*/
+
+# --- PYTHON & EXECUTABLES ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+.venv/
+env/
+
+# --- SYSTEM & IDE ---
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# --- LOGS & TEMP FILES ---
+*.log
+*.tmp
+*.bak

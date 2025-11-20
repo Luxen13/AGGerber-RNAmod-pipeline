@@ -1,0 +1,390 @@
+#!/usr/bin/env nextflow
+nextflow.enable.dsl=2
+
+// Define parameters with default values
+params.pod5_dir = false
+params.ref_genome = false
+params.ref_transcriptome = false
+params.genome_gtf = false
+params.outdir = './results'
+params.help = false
+params.model = 'sup'   // Default to 'sup' (super accuracy) model
+params.use_gpu = 'cuda:all'     // GPU specification: 'cuda:all' for all GPUs, or specify GPU IDs like 'cuda:0', 'cuda:0,1', etc.
+params.cpus = 4          // Default number of CPUs to use
+
+// Modification Calling Parameters
+params.mods = false //"m5C_2OmeC,inosine_m6A_2OmeA,pseU_2OmeU,2OmeG"  // Specify modifications to call, e.g., 'm6A 5mC pseU'.
+
+// Modkit Pileup Parameters
+params.modkit_filter_threshold = 0.8
+params.modkit_mod_threshold    = 0.98
+
+// Help message
+if (params.help) {
+    log.info """
+    Nanopore RNA Modification Analysis Pipeline
+    =========================================
+    This pipeline performs basecalling with integrated modification calling, alignment,
+    and modification pileup analysis using Dorado and Modkit.
+    
+    Usage:
+    nextflow run main.nf --pod5_dir <pod5_directory> --ref_genome <reference.fasta> [options]
+    
+    Required Arguments:
+      --pod5_dir      Path to the directory containing POD5 files (use quotes and wildcards for multiple samples).
+      --ref_genome    Path to the reference genome in FASTA format.
+      --ref_transcriptome    Path to the reference transcriptome in FASTA format.
+      --genome_gtf    Path to the genome annotation file in GTF format.
+    
+    Optional Arguments:
+      --outdir              Base path for output directories. Results will be in {outdir}/results_{meta.id}_{task.index}/. Default: ./results
+      --model               Basecalling model accuracy. Default: 'sup'
+      --use_gpu             GPU specification for basecalling. Default: 'cuda:all'
+                            - 'cuda:all': Use all available GPUs
+                            - 'cuda:0': Use GPU 0 only
+                            - 'cuda:0,1': Use GPUs 0 and 1
+                            - Specify any valid GPU ID(s) separated by commas
+      --cpus                Number of CPUs to use. Default: 4
+      
+    Modification Calling Options:
+      --mods                Space-separated list of modifications to call (e.g., 'm6A').
+                            Set to false to disable modification calling. Default: false
+      --modkit_threshold    Probability threshold for Modkit pileup. Default: 0.98
+      --motif_str           Motif and offset for Modkit analysis (e.g., 'DRACH 2'). Default: false (all-context)
+
+      --help                Display this help message.
+    """
+    exit 0
+}
+
+// Check for required parameters
+if (!params.pod5_dir) {
+    exit 1, "Input POD5 directory not specified! Please use --pod5_dir"
+}
+if (!params.ref_genome) {
+    exit 1, "Reference genome not specified! Please use --ref_genome"
+}
+if (!params.ref_transcriptome) {
+    exit 1, "Reference transcriptome not specified! Please use --ref_transcriptome"
+}
+if (!params.genome_gtf) {
+    exit 1, "Genome GTF annotation file not specified! Please use --genome_gtf"
+}
+
+
+
+
+// ---
+// Processes
+// ---
+
+
+// Basecalling with Dorado, including modification calling if specified
+process DORADO_BASECALL {
+    publishDir "${params.outdir}/results_${meta.id}_${task.index}/basecalled", mode: 'copy'
+    
+    input:
+    tuple val(meta), path(pod5_dir)
+    
+    output:
+    tuple val(meta), path("${meta.id}.bam"), emit: bam
+    
+    script:
+    def gpu_flag = "--device ${params.use_gpu}"
+    def mod_flag = (params.mods && params.mods != "false") ? "--modified-bases ${params.mods.replaceAll(',', ' ')}" : ''
+
+    """
+    dorado basecaller \\
+        ${gpu_flag} \\
+        "${params.model}" \\
+        "${pod5_dir}" \\
+        ${mod_flag} > "${meta.id}.bam"
+    """
+}
+
+// Genome alignment with Minimap2 conserving ML and MM tags for modifications
+process MINIMAP2_ALIGN_GENOME {
+    publishDir "${params.outdir}/results_${meta.id}_${task.index}/aligned_genome", mode: 'copy'
+    
+    input:
+    tuple val(meta), path(bam_file)
+    path ref_genome
+    
+    output:
+    tuple val(meta), path("${meta.id}.aligned.sorted.bam"), path("${meta.id}.aligned.sorted.bam.bai"), emit: bam_bai
+    
+    script:
+    // Use 'splice-ont' for genome alignment of RNA reads
+    """
+    # This preserves modification tags (mm, ml) essential for modification analysis
+    samtools fastq -T "*" "${bam_file}" | minimap2 -y --MD -ax splice-ont -t ${task.cpus} "${ref_genome}" - | \\
+    samtools view -bh -F 260 | \\
+    samtools sort -@ ${task.cpus} -o "${meta.id}.aligned.sorted.bam"
+    
+    # Index the BAM file
+    samtools index "${meta.id}.aligned.sorted.bam"
+    """
+}
+
+// Transcriptome alignment with Minimap2 conserving ML and MM tags for modifications
+process MINIMAP2_ALIGN_TRANSCRIPTOME {
+    publishDir "${params.outdir}/results_${meta.id}_${task.index}/aligned_transcriptome", mode: 'copy'
+    
+    input:
+    tuple val(meta), path(bam_file)
+    path ref_transcriptome
+    
+    output:
+    tuple val(meta), path("${meta.id}.transcriptome.aligned.sorted.bam"), path("${meta.id}.transcriptome.aligned.sorted.bam.bai"), emit: bam_bai
+    
+    script:
+    // Use 'map-ont' preset for transcriptome alignment of RNA reads
+    """
+    samtools fastq -T "*" "${bam_file}" | minimap2 -y --MD -ax map-ont -t ${task.cpus} "${ref_transcriptome}" - | \\
+    samtools view -bh -F 260 | \\
+    samtools sort -@ ${task.cpus} -o "${meta.id}.transcriptome.aligned.sorted.bam"
+    
+    # Index the BAM file
+    samtools index "${meta.id}.transcriptome.aligned.sorted.bam"
+    """
+}
+
+//NanoComp process for QC check with NanoComp Stats
+process NANOCOMP {
+    publishDir "${params.outdir}/results_${meta.id}_${task.index}/nanocomp", mode: 'copy'
+
+    
+    input:
+    tuple val(meta), path(transcriptome_bam), path(transcriptome_bai)
+    tuple val(meta2), path(genome_bam), path(genome_bai)
+
+    output:
+    tuple val(meta), path("nanocomp_report_${meta.id}"), emit: txt
+
+    script:
+    """
+    # Run NanoComp comparing transcriptome and genome alignments for the same sample
+    NanoComp \
+        --bam ${transcriptome_bam} ${genome_bam} \\
+        --plot false \\
+        --outdir "nanocomp_report_${meta.id}"
+    """
+}
+
+// Modkit pileup for genome-aligned BAM
+process MODKIT_PILEUP_GENOME {
+    publishDir "${params.outdir}/results_${meta.id}_${task.index}/modkit_pileup_genome", mode: 'copy'
+    
+    input:
+    tuple val(meta), path(bam), path(bai)
+    path ref_genome
+    
+    output:
+    tuple val(meta), path("${meta.id}.genome.bed"), emit: bed
+    tuple val(meta), path("${meta.id}.genome.log"), emit: log
+    
+    script:
+    // Map modification names to modkit codes
+    def mod_map = [
+        'm5C'   : 'm',
+        '2OmeC' : 'Cm',
+        'inosine': '17596',
+        'm6A'   : 'a',
+        '2OmeA' : 'Am',
+        'pseU'  : '17802',
+        '2OmeU' : 'Um',
+        '2OmeG' : 'Gm'
+    ]
+    
+    // Parse modifications called during basecalling and generate mod-threshold flags
+    def mod_threshold_flags = ""
+    if (params.mods && params.mods != "false") {
+        def called_mods = params.mods.split(',').collect { it.trim() }
+        mod_threshold_flags = called_mods.collect { mod ->
+            mod_map.containsKey(mod) ? "--mod-threshold ${mod_map[mod]}:${params.modkit_mod_threshold}" : ""
+        }.findAll { it != "" }.join(' ')
+    }
+    
+    """
+    modkit pileup \\
+        ${bam} \\
+        ${meta.id}.genome.bed \\
+        --ref ${ref_genome} \\
+        --threads ${task.cpus} \\
+        --filter-threshold ${params.modkit_filter_threshold} \\
+        ${mod_threshold_flags} \\
+        --log-filepath "${meta.id}.genome.log"
+    """
+}
+
+// Modkit transcriptome acceleration process for way faster modification pileup on transcriptome-aligned BAM
+process MODKIT_TRANSCRIPTOME_ACCELERATION {
+    publishDir "${params.outdir}/results_${meta.id}_${task.index}/modkit_pileup_transcriptome", mode: 'copy'
+    
+    input:
+    tuple val(meta), path(bam), path(bai)
+    path ref_transcriptome
+   
+    output:
+    tuple val(meta), path("${meta.id}.transcriptome_modified.bed"), emit: bed
+    tuple val(meta), path("${meta.id}.transcriptome.log"), emit: log
+
+    tuple val(meta), path("${meta.id}.transcriptome_concatenated.bam"), path("${meta.id}.transcriptome_concatenated.bam.csi"), emit: bam_bai
+    
+    script:
+    // Map modification names to modkit codes
+    def mod_map = [
+        'm5C'   : 'm',
+        '2OmeC' : 'Cm',
+        'inosine': '17596',
+        'm6A'   : 'a',
+        '2OmeA' : 'Am',
+        'pseU'  : '17802',
+        '2OmeU' : 'Um',
+        '2OmeG' : 'Gm'
+    ]
+    
+    // Parse modifications called during basecalling and generate mod-threshold flags
+    def mod_threshold_flags = ""
+    if (params.mods && params.mods != "false") {
+        def called_mods = params.mods.split(',').collect { it.trim() }
+        mod_threshold_flags = called_mods.collect { mod ->
+            mod_map.containsKey(mod) ? "--mod-threshold ${mod_map[mod]}:${params.modkit_mod_threshold}" : ""
+        }.findAll { it != "" }.join(' ')
+    }
+
+    //here filter and mod threshold flags are prefixed with a underscore for the argument parser in the accelerator
+    """
+    modkit_transcriptome_acceleration.py \
+        --reference "${ref_transcriptome}" \
+        --bam "${bam}" \
+        --threads ${task.cpus} \
+        --filter_threshold ${params.modkit_filter_threshold} \
+        --mod_threshold_flags "${mod_threshold_flags}"
+    """
+}
+
+///
+///OLD PROCESS, KEPT FOR REFERENCE
+///
+process MODKIT_PILEUP_TRANSCRIPTOME {
+    publishDir "${params.outdir}/results_${meta.id}_${task.index}/modkit_pileup_transcriptome_standard", mode: 'copy'
+    
+    input:
+    tuple val(meta), path(bam), path(bai)
+    path ref_transcriptome
+    
+    output:
+    tuple val(meta), path("${meta.id}.transcriptome_standard.bed"), emit: bed
+    tuple val(meta), path("${meta.id}.transcriptome.log"), emit: log
+    
+    script:
+    """
+    modkit pileup \\
+        -t ${task.cpus} \\
+        --ref ${ref_transcriptome} \\
+        --filter-threshold ${params.modkit_filter_threshold} \\
+        --log-filepath "${meta.id}.transcriptome.log" \\
+        ${bam} \\
+        "${meta.id}.transcriptome_standard.bed"
+    """
+}
+///
+///
+///
+
+// Salmon quantification using transcriptome-aligned BAM
+process SALMON_QUANT {
+    publishDir "${params.outdir}/results_${meta.id}_${task.index}/salmon_output", mode: 'copy'
+    
+    input:
+    tuple val(meta), path(bam), path(bai)
+    path ref_transcriptome
+    
+    output:
+    tuple val(meta), path("salmon.${meta.id}.${task.index}"), emit: salmon_dir
+    
+    script:
+    """
+    salmon quant \\
+        -t ${ref_transcriptome} \\
+        -l A \\
+        -a ${bam} \\
+        -o salmon.${meta.id}.${task.index} \\
+        -p ${task.cpus} \\
+        --minAssignedFrags 0
+    """
+}
+
+// FeatureCounts on genome-aligned BAM
+process FEATURECOUNTS_GENOME{
+    publishDir "${params.outdir}/results_${meta.id}_${task.index}/featurecounts", mode: 'copy'
+    
+    input:
+    tuple val(meta), path(bam), path(bai)
+    path genome_gtf
+    
+    output:
+    tuple val(meta), path("${meta.id}.featurecounts.tsv"), emit: counts
+    tuple val(meta), path("${meta.id}.featurecounts.tsv.summary"), emit: summary
+    
+    script:
+    """
+    featureCounts \\
+        -a "${genome_gtf}" \\
+        -L \\
+        -T ${task.cpus} \\
+        -o "${meta.id}.featurecounts.tsv" \\
+        "${bam}"
+    """
+}
+
+
+// ---
+// Workflow
+// ---
+
+workflow {
+    // Create input channels with metadata
+    // Fix the input channel to properly handle directories of POD5 files
+    ch_pod5_input = Channel.fromPath(params.pod5_dir, type: 'dir')
+                        .map { dir -> tuple([id: dir.getBaseName()], dir) }
+    
+    ch_ref_genome = file(params.ref_genome)
+    ch_genome_gtf = file(params.genome_gtf)
+    ch_ref_transcriptome = file(params.ref_transcriptome)
+
+    // Print debug information
+    ch_pod5_input.view { meta, dir -> "Processing POD5 directory: ${dir} with ID: ${meta.id}" }
+
+    // 1. Basecalling with optional modification calling
+    DORADO_BASECALL(ch_pod5_input)
+
+    // 2. Genome alignment (always required for featureCounts)
+    MINIMAP2_ALIGN_GENOME(DORADO_BASECALL.out.bam, ch_ref_genome)
+
+    // 3. Feature counting on genome-aligned BAM files 
+    FEATURECOUNTS_GENOME(MINIMAP2_ALIGN_GENOME.out.bam_bai, ch_genome_gtf)
+
+    // 4. Transcriptome alignment
+    MINIMAP2_ALIGN_TRANSCRIPTOME(DORADO_BASECALL.out.bam, ch_ref_transcriptome)
+
+    // 5. NanoComp comparison: take the transcriptome and genome aligned BAMs and run NanoComp.
+    // Pass both alignment outputs (each is a tuple: meta, bam, bai).
+    NANOCOMP(MINIMAP2_ALIGN_TRANSCRIPTOME.out.bam_bai, MINIMAP2_ALIGN_GENOME.out.bam_bai)
+    
+    
+    // 6. Salmon quantification using transcriptome-aligned BAM
+    SALMON_QUANT(MINIMAP2_ALIGN_TRANSCRIPTOME.out.bam_bai, ch_ref_transcriptome)
+
+
+    // 7. Modification pileup (only if mods were called)
+    if (params.mods && params.mods != "false") {
+        MODKIT_PILEUP_GENOME(MINIMAP2_ALIGN_GENOME.out.bam_bai, ch_ref_genome)
+        // Run transcriptome acceleration before regular modkit pileup
+        MODKIT_TRANSCRIPTOME_ACCELERATION(MINIMAP2_ALIGN_TRANSCRIPTOME.out.bam_bai, ch_ref_transcriptome)
+        // Optional: still run regular MODKIT_PILEUP_TRANSCRIPTOME if needed
+        // MODKIT_PILEUP_TRANSCRIPTOME(MINIMAP2_ALIGN_TRANSCRIPTOME.out.bam_bai, ch_ref_transcriptome)
+    }
+
+}
