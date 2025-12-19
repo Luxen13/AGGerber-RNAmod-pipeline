@@ -14,6 +14,7 @@ COPY conda.yml /opt/conda.yml
 
 # Create environment from YAML file, clean cache, and generate lock file
 RUN micromamba install -y -n base -f /opt/conda.yml \
+    && micromamba install -y -n base "setuptools>=78.1.1" \
     && micromamba clean -afy \
     && micromamba env export -n base --explicit > /opt/conda.lock
 

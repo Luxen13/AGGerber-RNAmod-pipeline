@@ -16,15 +16,18 @@ id_rsa.pub
 *_dsa
 
 
-# --- PIPELINE SPECIFIC ---
+# --- USER SPECIFIC ---
 nf/.nextflow/
 /nf/work/
+/nf/test/
 .nextflow.*
 nf/dist_modkit_v0.5.0_5120ef7/
 nf/test_pod5_Data.transcriptome.bed
 nf/results/*
 /prese/
 temporary_*/
+nf/nextflow_schema.json
+nf/runner.txt
 
 # --- PYTHON & EXECUTABLES ---
 __pycache__/

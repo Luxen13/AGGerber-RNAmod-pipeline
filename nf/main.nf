@@ -1,6 +1,10 @@
 #!/usr/bin/env nextflow
 nextflow.enable.dsl=2
 
+
+// Thread-safe list to store completion messages
+def completion_log = [].asSynchronized()
+
 // Define parameters with default values
 params.pod5_dir = false
 params.ref_genome = false
@@ -37,7 +41,7 @@ if (params.help) {
       --genome_gtf    Path to the genome annotation file in GTF format.
     
     Optional Arguments:
-      --outdir              Base path for output directories. Results will be in {outdir}/results_{meta.id}_{task.index}/. Default: ./results
+      --outdir              Base path for output directories. Results will be organized by file type (base, featureC, salmon, etc.). Default: ./results
       --model               Basecalling model accuracy. Default: 'sup'
       --use_gpu             GPU specification for basecalling. Default: 'cuda:all'
                             - 'cuda:all': Use all available GPUs
@@ -81,7 +85,7 @@ if (!params.genome_gtf) {
 
 // Basecalling with Dorado, including modification calling if specified
 process DORADO_BASECALL {
-    publishDir "${params.outdir}/results_${meta.id}_${task.index}/basecalled", mode: 'copy'
+    publishDir "${params.outdir}/base", mode: 'copy'
     
     input:
     tuple val(meta), path(pod5_dir)
@@ -104,7 +108,7 @@ process DORADO_BASECALL {
 
 // Genome alignment with Minimap2 conserving ML and MM tags for modifications
 process MINIMAP2_ALIGN_GENOME {
-    publishDir "${params.outdir}/results_${meta.id}_${task.index}/aligned_genome", mode: 'copy'
+    publishDir "${params.outdir}/base", mode: 'copy'
     
     input:
     tuple val(meta), path(bam_file)
@@ -128,7 +132,7 @@ process MINIMAP2_ALIGN_GENOME {
 
 // Transcriptome alignment with Minimap2 conserving ML and MM tags for modifications
 process MINIMAP2_ALIGN_TRANSCRIPTOME {
-    publishDir "${params.outdir}/results_${meta.id}_${task.index}/aligned_transcriptome", mode: 'copy'
+    publishDir "${params.outdir}/base", mode: 'copy'
     
     input:
     tuple val(meta), path(bam_file)
@@ -151,7 +155,7 @@ process MINIMAP2_ALIGN_TRANSCRIPTOME {
 
 //NanoComp process for QC check with NanoComp Stats
 process NANOCOMP {
-    publishDir "${params.outdir}/results_${meta.id}_${task.index}/nanocomp", mode: 'copy'
+    publishDir "${params.outdir}/nanocomp", mode: 'copy'
 
     
     input:
@@ -173,7 +177,7 @@ process NANOCOMP {
 
 // Modkit pileup for genome-aligned BAM
 process MODKIT_PILEUP_GENOME {
-    publishDir "${params.outdir}/results_${meta.id}_${task.index}/modkit_pileup_genome", mode: 'copy'
+    publishDir "${params.outdir}/modkitGenome", mode: 'copy'
     
     input:
     tuple val(meta), path(bam), path(bai)
@@ -186,14 +190,14 @@ process MODKIT_PILEUP_GENOME {
     script:
     // Map modification names to modkit codes
     def mod_map = [
-        'm5C'   : 'm',
-        '2OmeC' : 'Cm',
-        'inosine': '17596',
-        'm6A'   : 'a',
-        '2OmeA' : 'Am',
-        'pseU'  : '17802',
-        '2OmeU' : 'Um',
-        '2OmeG' : 'Gm'
+        "m6A": "a",
+        "Am": "69426",
+        "Ino": "17596",
+        "pseU": "17802",
+        "Um": "19227",
+        "Gm": "19229",
+        "Cm": "19228",
+        "m5C": "m"
     ]
     
     // Parse modifications called during basecalling and generate mod-threshold flags
@@ -219,7 +223,8 @@ process MODKIT_PILEUP_GENOME {
 
 // Modkit transcriptome acceleration process for way faster modification pileup on transcriptome-aligned BAM
 process MODKIT_TRANSCRIPTOME_ACCELERATION {
-    publishDir "${params.outdir}/results_${meta.id}_${task.index}/modkit_pileup_transcriptome", mode: 'copy'
+    publishDir "${params.outdir}/modkitTranscriptome", mode: 'copy', pattern: "*.{bed,log}"
+    publishDir "${params.outdir}/base", mode: 'copy', pattern: "*.{bam,csi}"
     
     input:
     tuple val(meta), path(bam), path(bai)
@@ -234,15 +239,16 @@ process MODKIT_TRANSCRIPTOME_ACCELERATION {
     script:
     // Map modification names to modkit codes
     def mod_map = [
-        'm5C'   : 'm',
-        '2OmeC' : 'Cm',
-        'inosine': '17596',
-        'm6A'   : 'a',
-        '2OmeA' : 'Am',
-        'pseU'  : '17802',
-        '2OmeU' : 'Um',
-        '2OmeG' : 'Gm'
+        "m6A": "a",
+        "Am": "69426",
+        "Ino": "17596",
+        "pseU": "17802",
+        "Um": "19227",
+        "Gm": "19229",
+        "Cm": "19228",
+        "m5C": "m"
     ]
+   
     
     // Parse modifications called during basecalling and generate mod-threshold flags
     def mod_threshold_flags = ""
@@ -264,38 +270,11 @@ process MODKIT_TRANSCRIPTOME_ACCELERATION {
     """
 }
 
-///
-///OLD PROCESS, KEPT FOR REFERENCE
-///
-process MODKIT_PILEUP_TRANSCRIPTOME {
-    publishDir "${params.outdir}/results_${meta.id}_${task.index}/modkit_pileup_transcriptome_standard", mode: 'copy'
-    
-    input:
-    tuple val(meta), path(bam), path(bai)
-    path ref_transcriptome
-    
-    output:
-    tuple val(meta), path("${meta.id}.transcriptome_standard.bed"), emit: bed
-    tuple val(meta), path("${meta.id}.transcriptome.log"), emit: log
-    
-    script:
-    """
-    modkit pileup \\
-        -t ${task.cpus} \\
-        --ref ${ref_transcriptome} \\
-        --filter-threshold ${params.modkit_filter_threshold} \\
-        --log-filepath "${meta.id}.transcriptome.log" \\
-        ${bam} \\
-        "${meta.id}.transcriptome_standard.bed"
-    """
-}
-///
-///
-///
+
 
 // Salmon quantification using transcriptome-aligned BAM
 process SALMON_QUANT {
-    publishDir "${params.outdir}/results_${meta.id}_${task.index}/salmon_output", mode: 'copy'
+    publishDir "${params.outdir}/salmon", mode: 'copy'
     
     input:
     tuple val(meta), path(bam), path(bai)
@@ -318,7 +297,7 @@ process SALMON_QUANT {
 
 // FeatureCounts on genome-aligned BAM
 process FEATURECOUNTS_GENOME{
-    publishDir "${params.outdir}/results_${meta.id}_${task.index}/featurecounts", mode: 'copy'
+    publishDir "${params.outdir}/featureC", mode: 'copy'
     
     input:
     tuple val(meta), path(bam), path(bai)
@@ -359,23 +338,50 @@ workflow {
 
     // 1. Basecalling with optional modification calling
     DORADO_BASECALL(ch_pod5_input)
+    DORADO_BASECALL.out.bam.subscribe { meta, file -> 
+        def msg = "Completed Dorado Basecalling for: ${meta.id}\n  -> Output: ${params.outdir}/base/${file.name}"
+        log.info msg
+    }
 
     // 2. Genome alignment (always required for featureCounts)
     MINIMAP2_ALIGN_GENOME(DORADO_BASECALL.out.bam, ch_ref_genome)
+    MINIMAP2_ALIGN_GENOME.out.bam_bai.subscribe { meta, bam, bai -> 
+        def msg = "Completed Genome Alignment for: ${meta.id}\n  -> Output: ${params.outdir}/base/${bam.name}"
+        log.info msg
+    }
 
     // 3. Feature counting on genome-aligned BAM files 
     FEATURECOUNTS_GENOME(MINIMAP2_ALIGN_GENOME.out.bam_bai, ch_genome_gtf)
+    FEATURECOUNTS_GENOME.out.counts.subscribe { meta, file -> 
+        def msg = "Completed FeatureCounts for: ${meta.id}\n  -> Output: ${params.outdir}/featureC/${file.name}"
+        log.info msg
+        completion_log.add(msg)
+    }
 
     // 4. Transcriptome alignment
     MINIMAP2_ALIGN_TRANSCRIPTOME(DORADO_BASECALL.out.bam, ch_ref_transcriptome)
+    MINIMAP2_ALIGN_TRANSCRIPTOME.out.bam_bai.subscribe { meta, bam, bai -> 
+        def msg = "Completed Transcriptome Alignment for: ${meta.id}\n  -> Output: ${params.outdir}/base/${bam.name}"
+        log.info msg
+    }
 
     // 5. NanoComp comparison: take the transcriptome and genome aligned BAMs and run NanoComp.
     // Pass both alignment outputs (each is a tuple: meta, bam, bai).
     NANOCOMP(MINIMAP2_ALIGN_TRANSCRIPTOME.out.bam_bai, MINIMAP2_ALIGN_GENOME.out.bam_bai)
+    NANOCOMP.out.txt.subscribe { meta, report -> 
+        def msg = "Completed NanoComp QC for: ${meta.id}\n  -> Output: ${params.outdir}/nanocomp/${report.name}"
+        log.info msg
+        completion_log.add(msg)
+    }
     
     
     // 6. Salmon quantification using transcriptome-aligned BAM
     SALMON_QUANT(MINIMAP2_ALIGN_TRANSCRIPTOME.out.bam_bai, ch_ref_transcriptome)
+    SALMON_QUANT.out.salmon_dir.subscribe { meta, dir -> 
+        def msg = "Completed Salmon Quantification for: ${meta.id}\n  -> Output: ${params.outdir}/salmon/${dir.name}"
+        log.info msg
+        completion_log.add(msg)
+    }
 
 
     // 7. Modification pileup (only if mods were called)
@@ -383,8 +389,34 @@ workflow {
         MODKIT_PILEUP_GENOME(MINIMAP2_ALIGN_GENOME.out.bam_bai, ch_ref_genome)
         // Run transcriptome acceleration before regular modkit pileup
         MODKIT_TRANSCRIPTOME_ACCELERATION(MINIMAP2_ALIGN_TRANSCRIPTOME.out.bam_bai, ch_ref_transcriptome)
-        // Optional: still run regular MODKIT_PILEUP_TRANSCRIPTOME if needed
-        // MODKIT_PILEUP_TRANSCRIPTOME(MINIMAP2_ALIGN_TRANSCRIPTOME.out.bam_bai, ch_ref_transcriptome)
-    }
 
+        
+        // Log completion for modification steps
+        MODKIT_PILEUP_GENOME.out.bed.subscribe { meta, file -> 
+            def msg = "Completed Modkit Genome Pileup for: ${meta.id}\n  -> Output: ${params.outdir}/modkitGenome/${file.name}"
+            log.info msg
+            completion_log.add(msg)
+        }
+        MODKIT_TRANSCRIPTOME_ACCELERATION.out.bed.subscribe { meta, file -> 
+            def msg = "Completed Modkit Transcriptome Pileup for: ${meta.id}\n  -> Output: ${params.outdir}/modkitTranscriptome/${file.name}"
+            log.info msg
+            completion_log.add(msg)
+        }
+    }
+}
+
+workflow.onComplete {
+    log.info """
+    Pipeline execution summary
+    ---------------------------
+    Completed at: ${workflow.complete}
+    Duration    : ${workflow.duration}
+    Success     : ${workflow.success}
+    workDir     : ${workflow.workDir}
+    exit status : ${workflow.exitStatus}
+    """
+
+    log.info "\nGenerated Output Files:"
+    log.info "======================="
+    completion_log.each { msg -> log.info msg }
 }
