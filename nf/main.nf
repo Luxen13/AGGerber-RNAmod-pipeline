@@ -190,14 +190,22 @@ process MODKIT_PILEUP_GENOME {
     script:
     // Map modification names to modkit codes
     def mod_map = [
-        "m6A": "a",
-        "Am": "69426",
-        "Ino": "17596",
-        "pseU": "17802",
-        "Um": "19227",
-        "Gm": "19229",
-        "Cm": "19228",
-        "m5C": "m"
+        'm6a':   'a',
+        '6ma':   'a',
+        'am':    '69426',
+        '2omea': '69426',
+        'inosine': '17596',
+        'ino':     '17596',
+        'pseu':    '17802',
+        'pseudouridine': '17802',
+        'um':    '19227',
+        '2omeu': '19227',
+        'gm':    '19229',
+        '2omeg': '19229',
+        'cm':    '19228',
+        '2omec': '19228',
+        'm5c':   'm',
+        '5mc':   'm'
     ]
     
     // Parse modifications called during basecalling and generate mod-threshold flags
@@ -239,14 +247,22 @@ process MODKIT_TRANSCRIPTOME_ACCELERATION {
     script:
     // Map modification names to modkit codes
     def mod_map = [
-        "m6A": "a",
-        "Am": "69426",
-        "Ino": "17596",
-        "pseU": "17802",
-        "Um": "19227",
-        "Gm": "19229",
-        "Cm": "19228",
-        "m5C": "m"
+        'm6a':   'a',
+        '6ma':   'a',
+        'am':    '69426',
+        '2omea': '69426',
+        'inosine': '17596',
+        'ino':     '17596',
+        'pseu':    '17802',
+        'pseudouridine': '17802',
+        'um':    '19227',
+        '2omeu': '19227',
+        'gm':    '19229',
+        '2omeg': '19229',
+        'cm':    '19228',
+        '2omec': '19228',
+        'm5c':   'm',
+        '5mc':   'm'
     ]
    
     
